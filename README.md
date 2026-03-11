@@ -44,16 +44,70 @@ pneumonia_project/
 
 ## Setup
 
+### 1. Clone the repository
+
 ```bash
 git clone <repo-url>
 cd pneumonia_project
+```
 
+### 2. Create a virtual environment
+
+A **virtual environment** is an isolated Python installation that lives inside your project folder. It keeps all the packages you install for this project (PyTorch, FastAPI, Streamlit, …) completely separate from your system Python and from other projects on your machine.
+
+**Why does this matter?**
+- Different projects often need different versions of the same library. Without isolation they clash and break each other.
+- Your global Python stays clean — uninstalling the project is as simple as deleting the `venv/` folder.
+- Everyone on the team works with the exact same dependency versions, so "it works on my machine" stops being an excuse.
+
+```bash
+# Create the virtual environment (only needed once)
+python -m venv venv
+```
+
+This creates a `venv/` folder in the project root. It contains a private copy of the Python interpreter and a `site-packages/` directory where libraries will be installed.
+
+### 3. Activate the virtual environment
+
+You must activate the environment **every time you open a new terminal** before running any project command.
+
+**macOS / Linux:**
+```bash
+source venv/bin/activate
+```
+
+**Windows (Command Prompt):**
+```bash
+venv\Scripts\activate.bat
+```
+
+**Windows (PowerShell):**
+```bash
+venv\Scripts\Activate.ps1
+```
+
+Once activated, your prompt will show `(venv)` at the beginning, confirming you are inside the environment.
+
+To leave the environment at any time:
+```bash
+deactivate
+```
+
+### 4. Install dependencies
+
+With the environment active, install all required packages in one command:
+
+```bash
 pip install -r requirements.txt
 ```
+
+This reads `requirements.txt` and installs the exact libraries needed — PyTorch, torchvision, FastAPI, Streamlit, scikit-learn, matplotlib, and more — only inside your virtual environment.
 
 ---
 
 ## How to run
+
+> Make sure your virtual environment is **activated** (`source venv/bin/activate`) before running any of the commands below.
 
 **1. Start the FastAPI backend**
 ```bash
@@ -114,5 +168,6 @@ img_0003,0.83
 ---
 
 ## Data
+
 - `PNEUMONIA` images → label **1**
 - `NORMAL` images → label **0**
