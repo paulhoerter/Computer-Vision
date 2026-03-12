@@ -58,8 +58,10 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from sklearn.metrics import roc_auc_score
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import numpy as np
+import json
 
 from models import MODEL_REGISTRY
 
@@ -71,7 +73,7 @@ app = FastAPI(title="Pneumonia Detection API")
 ROOT        = Path(__file__).resolve().parent.parent
 TRAIN_DIR   = ROOT / "data" / "train"
 VAL_DIR     = ROOT / "data" / "val"
-TEST_DIR    = ROOT / "data" / "test_for_students"
+TEST_DIR    = ROOT / "submission" / "test_for_students"
 WEIGHTS_DIR = ROOT / "api" / "weights"
 WEIGHTS_DIR.mkdir(exist_ok=True)
 
@@ -130,15 +132,24 @@ def get_transforms(image_size: int, augment: bool = False):
     if augment:
         return transforms.Compose([
             # resize to image_size
+            transforms.Resize((image_size, image_size)),
             # random augmentations
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
             # ToTensor
+            transforms.ToTensor(),
             # normalize
+            normalize
         ])
     else:
         return transforms.Compose([
             # resize to image_size
+            transforms.Resize((image_size, image_size)),
             # ToTensor
+            transforms.ToTensor(),
             # normalize
+            normalize
         ])
 
 
@@ -147,8 +158,8 @@ def get_dataloaders(image_size: int, batch_size: int):
     train_dataset = datasets.ImageFolder(TRAIN_DIR, transform=get_transforms(image_size, augment=True))
     val_dataset   = datasets.ImageFolder(VAL_DIR,   transform=get_transforms(image_size, augment=False))
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=0, pin_memory=False)
+    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
 
     return train_loader, val_loader
 
@@ -235,7 +246,7 @@ def train(req: TrainRequest):
     criterion = nn.BCEWithLogitsLoss()
 
     # Optional: add a learning rate scheduler here
-
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
     train_losses, val_losses   = [], []
     train_accs,   val_accs     = [], []
     train_aucs,   val_aucs     = [], []
@@ -270,6 +281,41 @@ def train(req: TrainRequest):
         val_aucs=val_aucs,
         best_val_auc=best_val_auc,
     )
+
+
+@app.post("/train-stream")
+def train_stream(req: TrainRequest):
+    """Same as /train but streams one JSON line per epoch for real-time progress."""
+    if req.model_name not in MODEL_REGISTRY:
+        raise HTTPException(status_code=400, detail=f"Unknown model '{req.model_name}'. Choose from {list(MODEL_REGISTRY)}")
+
+    def generate():
+        train_loader, val_loader = get_dataloaders(req.image_size, req.batch_size)
+        model     = MODEL_REGISTRY[req.model_name](in_channels=3, dropout_rate=req.dropout_rate).to(DEVICE)
+        optimizer = torch.optim.Adam(model.parameters(), lr=req.learning_rate)
+        criterion = nn.BCEWithLogitsLoss()
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
+        best_val_auc = 0.0
+
+        for epoch in range(req.epochs):
+            tr_loss, tr_acc, tr_auc = train_one_epoch(model, train_loader, optimizer, criterion)
+            vl_loss, vl_acc, vl_auc = evaluate(model, val_loader, criterion)
+            scheduler.step(vl_loss)
+
+            if vl_auc > best_val_auc:
+                best_val_auc = vl_auc
+                weight_path  = WEIGHTS_DIR / f"{req.model_name.replace(' ', '_')}_best.pt"
+                torch.save(model.state_dict(), weight_path)
+
+            line = json.dumps({
+                "epoch": epoch + 1, "total_epochs": req.epochs,
+                "train_loss": round(tr_loss, 4), "train_acc": round(tr_acc, 4), "train_auc": round(tr_auc, 4),
+                "val_loss": round(vl_loss, 4), "val_acc": round(vl_acc, 4), "val_auc": round(vl_auc, 4),
+                "best_val_auc": round(best_val_auc, 4),
+            })
+            yield line + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 @app.post("/predict", response_model=PredictResponse)

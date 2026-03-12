@@ -86,20 +86,20 @@ class InceptionBlock(nn.Module):
 
         # Branch 2: 1×1 → 3×3
         self.branch2 = nn.Sequential(
-            # bottleneck 1×1
-            # 3×3 conv (padding=1 to preserve spatial size)
+            conv_bn_relu(in_channels, b2_reduce, kernel=1),
+            conv_bn_relu(b2_reduce,   b2_out,    kernel=3, padding=1),
         )
 
         # Branch 3: 1×1 → 5×5
         self.branch3 = nn.Sequential(
-            # bottleneck 1×1
-            # 5×5 conv (padding=2 to preserve spatial size)
+            conv_bn_relu(in_channels, b3_reduce, kernel=1),
+            conv_bn_relu(b3_reduce,   b3_out,    kernel=5, padding=2),
         )
 
         # Branch 4: MaxPool → 1×1
         self.branch4 = nn.Sequential(
             nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
-            # 1×1 conv
+            conv_bn_relu(in_channels, b4_out, kernel=1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

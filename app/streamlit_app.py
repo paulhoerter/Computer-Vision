@@ -82,11 +82,42 @@ with st.sidebar:
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
-def call_train(payload: dict) -> dict:
-    """POST /train and return the JSON response or raise on error."""
-    resp = requests.post(f"{API_URL}/train", json=payload, timeout=3600)
+def call_train_stream(payload: dict, progress_bar, log_container):
+    """POST /train-stream and yield epoch results as they arrive."""
+    resp = requests.post(f"{API_URL}/train-stream", json=payload, timeout=3600, stream=True)
     resp.raise_for_status()
-    return resp.json()
+
+    results = {
+        "train_losses": [], "val_losses": [],
+        "train_accs": [],   "val_accs": [],
+        "train_aucs": [],   "val_aucs": [],
+        "best_val_auc": 0.0,
+    }
+    import json
+    log_lines = []
+
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line:
+            continue
+        data = json.loads(line)
+        results["train_losses"].append(data["train_loss"])
+        results["val_losses"].append(data["val_loss"])
+        results["train_accs"].append(data["train_acc"])
+        results["val_accs"].append(data["val_acc"])
+        results["train_aucs"].append(data["train_auc"])
+        results["val_aucs"].append(data["val_auc"])
+        results["best_val_auc"] = data["best_val_auc"]
+
+        progress_bar.progress(data["epoch"] / data["total_epochs"],
+                              text=f"Epoch {data['epoch']}/{data['total_epochs']}")
+        log_lines.append(
+            f"Epoch {data['epoch']:>2}/{data['total_epochs']} | "
+            f"Train loss {data['train_loss']:.4f}  acc {data['train_acc']:.4f}  auc {data['train_auc']:.4f} | "
+            f"Val loss {data['val_loss']:.4f}  acc {data['val_acc']:.4f}  auc {data['val_auc']:.4f}"
+        )
+        log_container.code("\n".join(log_lines))
+
+    return results
 
 
 def call_predict(payload: dict) -> dict:
@@ -109,14 +140,31 @@ def plot_curves(results: dict, model_name: str) -> plt.Figure:
     epochs_range = range(1, len(results["train_losses"]) + 1)
 
     # Loss
-    # axes[0]: plot train_losses and val_losses
-    # label axes, add legend, set title
+    axes[0].plot(epochs_range, results["train_losses"], label="Train")
+    axes[0].plot(epochs_range, results["val_losses"],   label="Val")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Loss")
+    axes[0].set_title("Loss")
+    axes[0].legend()
+    axes[0].xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
     # Accuracy
-    # axes[1]: plot train_accs and val_accs
+    axes[1].plot(epochs_range, results["train_accs"], label="Train")
+    axes[1].plot(epochs_range, results["val_accs"],   label="Val")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Accuracy")
+    axes[1].set_title("Accuracy")
+    axes[1].legend()
+    axes[1].xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
     # AUC
-    # axes[2]: plot train_aucs and val_aucs
+    axes[2].plot(epochs_range, results["train_aucs"], label="Train")
+    axes[2].plot(epochs_range, results["val_aucs"],   label="Val")
+    axes[2].set_xlabel("Epoch")
+    axes[2].set_ylabel("AUC")
+    axes[2].set_title("ROC-AUC")
+    axes[2].legend()
+    axes[2].xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
     fig.suptitle(f"{model_name} — Training curves", fontsize=14, fontweight="bold")
     fig.tight_layout()
@@ -128,8 +176,22 @@ def plot_confusion_matrix(results: dict) -> plt.Figure:
     Optional: build a confusion matrix figure from the last validation pass.
     You may need to add TP/FP/TN/FN counts to the /train response for this.
     """
+    cm = [
+        [results.get("tn", 0), results.get("fp", 0)],
+        [results.get("fn", 0), results.get("tp", 0)],
+    ]
     fig, ax = plt.subplots(figsize=(4, 4))
-    # build confusion matrix
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_xticks([0, 1]); ax.set_xticklabels(["Pred Normal", "Pred Pneumonia"])
+    ax.set_yticks([0, 1]); ax.set_yticklabels(["Normal", "Pneumonia"])
+    ax.set_xlabel("Predicted"); ax.set_ylabel("Actual")
+    ax.set_title("Confusion Matrix")
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, cm[i][j], ha="center", va="center", fontsize=14,
+                    color="white" if cm[i][j] > max(cm[0][0], cm[1][1]) / 2 else "black")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
     return fig
 
 
@@ -218,16 +280,17 @@ elif page == "🧠 Train":
             "image_size":    image_size,
         }
 
-        with st.spinner(f"Training {selected_model} for {epochs} epochs… this may take a while."):
-            try:
-                results = call_train(payload)
-                st.session_state.last_results    = results
-                st.session_state.last_model_name = selected_model
-                st.success(f"Training complete! Best val AUC: **{results['best_val_auc']:.4f}**")
-            except requests.exceptions.ConnectionError:
-                st.error("Cannot reach the API. Is `uvicorn main:app --reload --port 8000` running?")
-            except Exception as e:
-                st.error(f"Training failed: {e}")
+        try:
+            progress_bar  = st.progress(0, text="Starting training…")
+            log_container = st.empty()
+            results = call_train_stream(payload, progress_bar, log_container)
+            st.session_state.last_results    = results
+            st.session_state.last_model_name = selected_model
+            st.success(f"Training complete! Best val AUC: **{results['best_val_auc']:.4f}**")
+        except requests.exceptions.ConnectionError:
+            st.error("Cannot reach the API. Is `uvicorn main:app --reload --port 8000` running?")
+        except Exception as e:
+            st.error(f"Training failed: {e}")
 
     if st.session_state.last_results and st.session_state.last_model_name == selected_model:
         st.divider()
